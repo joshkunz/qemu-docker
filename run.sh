@@ -44,6 +44,34 @@ ip link set dev $QEMU_BRIDGE up
 # Finally, start our DHCPD server
 udhcpd -I $DUMMY_DHCPD_IP -f $DHCPD_CONF_FILE &
 
+# Configure QEMU for graceful shutdown
+QEMU_MONPORT=7100
+QEMU_POWERDOWN_TIMEOUT=30
+
+_graceful_shutdown() {
+
+  local COUNT=0
+  local QEMU_MONPORT="${QEMU_MONPORT:-7100}"
+  local QEMU_POWERDOWN_TIMEOUT="${QEMU_POWERDOWN_TIMEOUT:-120}"
+
+  echo "Trying to shut down the VM gracefully"
+  echo 'system_powerdown' | nc -q 1 localhost ${QEMU_MONPORT}>/dev/null 2>&1
+  echo ""
+  while echo 'info version'|nc -q 1 localhost ${QEMU_MONPORT:-7100}>/dev/null 2>&1 && [ "${COUNT}" -lt "${QEMU_POWERDOWN_TIMEOUT}" ]; do
+    let COUNT++
+    echo "QEMU still running. Retrying... (${COUNT}/${QEMU_POWERDOWN_TIMEOUT})"
+    sleep 1
+  done
+
+  if echo 'info version'|nc -q 1 localhost ${QEMU_MONPORT:-7100}>/dev/null 2>&1; then
+    echo "Killing the VM"
+    echo 'quit' | nc -q 1 localhost ${QEMU_MONPORT}>/dev/null 2>&1 || true
+  fi
+  echo "Exiting..."
+}
+
+trap _graceful_shutdown SIGINT SIGTERM SIGHUP
+
 # And run the VM! A brief explaination of the options here:
 # -enable-kvm: Use KVM for this VM (much faster for our case).
 # -nographic: disable SDL graphics.
@@ -52,5 +80,8 @@ udhcpd -I $DUMMY_DHCPD_IP -f $DHCPD_CONF_FILE &
 # -drive: The VM image we're booting.
 exec qemu-system-x86_64 -enable-kvm -nographic -serial mon:stdio \
     -nic tap,id=qemu0,script=$QEMU_IFUP,downscript=$QEMU_IFDOWN \
+    -monitor telnet:localhost:${QEMU_MONPORT:-7100},server,nowait,nodelay \
     "$@" \
-    -drive format=raw,file=/image
+    -drive format=raw,file=/image &
+
+wait $!
